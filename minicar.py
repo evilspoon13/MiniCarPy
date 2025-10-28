@@ -21,6 +21,8 @@ class CANCarController:
     CAN_ID_MOTOR_CMD = 0x100
     CAN_ID_EMERGENCY_STOP = 0x101
     CAN_ID_CONFIG = 0x102
+    CANID_RX_HEARTBEAT = 0x103
+    CANID_TX_HEARTBEAT = 0x104
     
     def __init__(self, interface='socketcan', channel='can0', bitrate=500000):
         try:
@@ -67,6 +69,14 @@ class CANCarController:
             print(f"→ Sent: {MotorCommand(command).name}, Speed: {speed}%")
         except Exception as e:
             print(f"✗ Error sending message: {e}")
+
+    #not sure when to use this, but it seems like it should happen
+    def send_rx_heartbeat(self):
+        message = can.Message(
+            arbitration_id=self.CAN_ID_RX_HEARTBEAT,
+            data=[0, 0, 0, 0, 0, 0, 0, 0],
+            is_extended_id=False
+        )
     
     def send_emergency_stop(self):
         message = can.Message(
