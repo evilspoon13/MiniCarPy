@@ -1,228 +1,75 @@
-import can
-import keyboard
+import serial
 import time
-import sys
-from enum import IntEnum
+import msvcrt
 
+SERIAL_PORT = 'COM7'
+SERIAL_BAUD = 2000000
 
-class MotorCommand(IntEnum):
-    """Motor command codes matching STM32 firmware"""
-    CMD_STOP = 0x00
-    CMD_FORWARD = 0x01
-    CMD_BACKWARD = 0x02
-    CMD_TURN_LEFT = 0x03
-    CMD_TURN_RIGHT = 0x04
+ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
+print(f"Listening on {SERIAL_PORT}")
 
+def receive_can(ser):
+    """
+        # id: low byte is frame[5], high byte is frame[3]
+        data length code: frame[9]
+        payload: frame[10:19] (10:10 + length)
+    """
+    frame = ser.read(20)
+    can_id = (frame[3] << 8) | frame[5]
+    dlc = frame[9]
+    data = frame[10:10+dlc]
+    data_hex = ' '.join([f'{b:02x}' for b in data])
+    print(f"RX: ID=0x{can_id:03X} Data=[{data_hex}]")
+    #print(frame)
 
-class CANCarController:
-    """Main controller class for CAN car interface"""
+def send_can_frame(ser, can_id, data):
+    """
+        Send a CAN frame via Waveshare adapter in binary format
+        Frame structure: [0xAA, 0x55, ?, id_h, ?, id_l, ?, ?, ?, dlc, data[0-7], ?, checksum]
+    """
+    dlc = len(data)
     
-    # CAN Message IDs
-    CAN_ID_MOTOR_CMD = 0x100
-    CAN_ID_EMERGENCY_STOP = 0x101
-    CAN_ID_CONFIG = 0x102
-    CANID_RX_HEARTBEAT = 0x103
-    CANID_TX_HEARTBEAT = 0x104
+    frame = bytearray(20)
+    frame[0] = 0xAA  # Header
+    frame[1] = 0x55  # Header
+    frame[2] = 0x01  # Unknown
+    frame[3] = (can_id >> 8) & 0xFF  # CAN ID high byte
+    frame[4] = 0x01  # Unknown
+    frame[5] = can_id & 0xFF  # CAN ID low byte
+    frame[6] = 0x01  # Unknown
+    frame[7] = 0x00  # Unknown
+    frame[8] = 0x00  # Unknown
+    frame[9] = dlc   # Data length
     
-    def __init__(self, interface='socketcan', channel='can0', bitrate=500000):
-        try:
-            self.bus = can.interface.Bus(
-                channel=channel,
-                bustype=interface,
-                bitrate=bitrate
-            )
-            print(f"Connected to CAN bus: {channel} at {bitrate} bps")
-        except Exception as e:
-            print(f"Failed to connect to CAN bus: {e}")
-            sys.exit(1)
-        
-        self.current_speed = 50  # Default speed (0-100)
-        self.running = True
-        self.last_command = MotorCommand.CMD_STOP
-        
-    def send_motor_command(self, command, speed=None):
-        """
-        Send motor command via CAN
-        
-        Args:
-            command: MotorCommand enum value
-            speed: Speed value 0-100 (optional, uses current_speed if None)
-        """
-        if speed is None:
-            speed = self.current_speed
-        
-        # clamp speed
-        speed = max(0, min(100, speed))
-        
-        # Pack CAN message: [command, speed, 0, 0, 0, 0, 0, 0]
-        data = [command, speed, 0, 0, 0, 0, 0, 0]
-        
-        message = can.Message(
-            arbitration_id=self.CAN_ID_MOTOR_CMD,
-            data=data,
-            is_extended_id=False
-        )
-        
-        try:
-            self.bus.send(message)
-            self.last_command = command
-            print(f"→ Sent: {MotorCommand(command).name}, Speed: {speed}%")
-        except Exception as e:
-            print(f"✗ Error sending message: {e}")
-
-    #not sure when to use this, but it seems like it should happen
-    def send_rx_heartbeat(self):
-        message = can.Message(
-            arbitration_id=self.CAN_ID_RX_HEARTBEAT,
-            data=[0, 0, 0, 0, 0, 0, 0, 0],
-            is_extended_id=False
-        )
+    for i in range(dlc):
+        frame[10 + i] = data[i]
     
-    def send_emergency_stop(self):
-        message = can.Message(
-            arbitration_id=self.CAN_ID_EMERGENCY_STOP,
-            data=[0xFF, 0, 0, 0, 0, 0, 0, 0],
-            is_extended_id=False
-        )
-        
-        try:
-            self.bus.send(message)
-            print("emergency stopping")
-        except Exception as e:
-            print(f"Error sending emergency stop: {e}")
+    # Calculate checksum: SUM(bytes 0-18) + 1
+    checksum = (sum(frame[0:19]) + 1) & 0xFF
+    frame[19] = checksum
     
-    def send_config(self, max_speed=100, timeout_ms=1000):
-        """
-        Send configuration parameters to car
-        
-        Args:
-            max_speed: Maximum allowed speed (0-100)
-            timeout_ms: Heartbeat timeout in milliseconds
-        """
-        # Pack config: [max_speed, timeout_high_byte, timeout_low_byte, ...]
-        timeout_high = (timeout_ms >> 8) & 0xFF
-        timeout_low = timeout_ms & 0xFF
-        
-        data = [max_speed, timeout_high, timeout_low, 0, 0, 0, 0, 0]
-        
-        message = can.Message(
-            arbitration_id=self.CAN_ID_CONFIG,
-            data=data,
-            is_extended_id=False
-        )
-        
-        try:
-            self.bus.send(message)
-            print(f"Config sent: Max Speed={max_speed}%, Timeout={timeout_ms}ms")
-        except Exception as e:
-            print(f"Error sending config: {e}")
-    
-    def adjust_speed(self, delta):
-        self.current_speed = max(0, min(100, self.current_speed + delta))
-        print(f"Speed adjusted to {self.current_speed}%")
-        # Resend last command with new speed
-        if self.last_command != MotorCommand.CMD_STOP:
-            self.send_motor_command(self.last_command)
-    
-    def print_controls(self):
-        """Print control instructions"""
-        print("\n" + "="*50)
-        print("CAN CAR CONTROLLER - KEYBOARD CONTROLS")
-        print("="*50)
-        print("Movement:")
-        print("  W - Forward")
-        print("  S - Backward")
-        print("  A - Turn Left")
-        print("  D - Turn Right")
-        print("  SPACE - Stop")
-        print("\nSpeed Control:")
-        print("  + / = - Increase speed")
-        print("  - / _ - Decrease speed")
-        print("\nOther:")
-        print("  E - Emergency Stop")
-        print("  C - Send Config")
-        print("  Q - Quit")
-        print("="*50)
-        print(f"Current Speed: {self.current_speed}%\n")
-    
-    def run(self):
-        self.print_controls()
-        
-        print("Controller ready. Press keys to control the car...")
-        print("Press 'Q' to quit.\n")
-        
-        try:
-            while self.running:
-                if keyboard.is_pressed('w'):
-                    self.send_motor_command(MotorCommand.CMD_FORWARD)
-                    time.sleep(0.1)
-                
-                elif keyboard.is_pressed('s'):
-                    self.send_motor_command(MotorCommand.CMD_BACKWARD)
-                    time.sleep(0.1)
-                
-                elif keyboard.is_pressed('a'):
-                    self.send_motor_command(MotorCommand.CMD_TURN_LEFT)
-                    time.sleep(0.1)
-                
-                elif keyboard.is_pressed('d'):
-                    self.send_motor_command(MotorCommand.CMD_TURN_RIGHT)
-                    time.sleep(0.1)
-                
-                elif keyboard.is_pressed('space'):
-                    self.send_motor_command(MotorCommand.CMD_STOP)
-                    time.sleep(0.1)
-                
-                elif keyboard.is_pressed('e'):
-                    self.send_emergency_stop()
-                    time.sleep(0.3)
-                
-                elif keyboard.is_pressed('c'):
-                    self.send_config()
-                    time.sleep(0.3)
-                
-                elif keyboard.is_pressed('+') or keyboard.is_pressed('='):
-                    self.adjust_speed(10)
-                    time.sleep(0.2)
-                
-                elif keyboard.is_pressed('-') or keyboard.is_pressed('_'):
-                    self.adjust_speed(-10)
-                    time.sleep(0.2)
-                
-                elif keyboard.is_pressed('q'):
-                    print("\nShutting down...")
-                    self.send_motor_command(MotorCommand.CMD_STOP)
-                    self.running = False
-                
-                time.sleep(0.05)
-                
-        except KeyboardInterrupt:
-            print("\n\nInterrupted by user")
-        finally:
-            self.cleanup()
-    
-    def cleanup(self):
-        print("sending final stop command...")
-        self.send_motor_command(MotorCommand.CMD_STOP)
-        time.sleep(0.1)
-        self.bus.shutdown()
-        print("CAN bus connection closed")
-
+    ser.write(bytes(frame))
+    data_hex = ' '.join([f'{b:02x}' for b in data[:dlc]])
+    print(f"TX: ID=0x{can_id:03X} Data=[{data_hex}]")
 
 def main():
-    print("CAN Car Controller - Starting...")
-    
-    controller = CANCarController(
-        interface='socketcan',
-        channel='can0',
-        bitrate=500000
-    )
-    
-    # Send initial config
-    controller.send_config(max_speed=100, timeout_ms=1000)
-    
-    controller.run()
-
+    try:
+        while True:
+            # log all RX 
+            if ser.in_waiting >= 20:
+                receive_can(ser)
+            
+            # TX
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key == b' ':  # Spacebar
+                    send_can_frame(ser, 0x103, [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+            
+            time.sleep(0.01)
+    except KeyboardInterrupt:
+        print("\nstopped")
+    finally:
+        ser.close()
 
 if __name__ == "__main__":
     main()
