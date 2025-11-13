@@ -5,8 +5,22 @@ import msvcrt
 SERIAL_PORT = 'COM7'
 SERIAL_BAUD = 2000000
 
+CANID_MOTOR_CMD = 0x100
+CANID_RX_HEARTBEAT = 0x103
+CANID_TX_HEARTBEAT = 0x104
+
+CMD_STOP = 0
+CMD_FORWARD = 1
+CMD_BACKWARD = 2
+CMD_TURN_LEFT = 3
+CMD_TURN_RIGHT = 4
+
+last_rx_heartbeat = 0
+current_speed = 50  # default speed (0-99 PWM)
+
 ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
 print(f"Listening on {SERIAL_PORT}")
+print("Controls: WASD=movement, SPACE=stop, 1-9=speed (1=11%, 9=99%)")
 
 def receive_can(ser):
     """
@@ -14,12 +28,18 @@ def receive_can(ser):
         data length code: frame[9]
         payload: frame[10:19] (10:10 + length)
     """
+    global last_rx_heartbeat
+    
     frame = ser.read(20)
     can_id = (frame[3] << 8) | frame[5]
     dlc = frame[9]
     data = frame[10:10+dlc]
     data_hex = ' '.join([f'{b:02x}' for b in data])
     print(f"RX: ID=0x{can_id:03X} Data=[{data_hex}]")
+
+    if can_id == CANID_TX_HEARTBEAT:
+        last_rx_heartbeat = time.time()
+
     #print(frame)
 
 def send_can_frame(ser, can_id, data):
@@ -53,6 +73,8 @@ def send_can_frame(ser, can_id, data):
     print(f"TX: ID=0x{can_id:03X} Data=[{data_hex}]")
 
 def main():
+    global current_speed
+    
     try:
         while True:
             # log all RX 
@@ -62,9 +84,27 @@ def main():
             # TX
             if msvcrt.kbhit():
                 key = msvcrt.getch()
-                if key == b' ':  # Spacebar
-                    send_can_frame(ser, 0x103, [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+                
+                # Speed control (1-9)
+                if key in [b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9']:
+                    speed_level = int(key.decode())
+                    current_speed = int(speed_level * 11)  # Map 1-9 to 11-99 PWM
+                    print(f"Speed set to: {current_speed}%")
+                
+                # Movement commands
+                elif key == b'w':   # forward
+                    send_can_frame(ser, CANID_MOTOR_CMD, [CMD_FORWARD, current_speed, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+                elif key == b'a':   # left
+                    send_can_frame(ser, CANID_MOTOR_CMD, [CMD_TURN_LEFT, current_speed, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+                elif key == b's':   # backward
+                    send_can_frame(ser, CANID_MOTOR_CMD, [CMD_BACKWARD, current_speed, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+                elif key == b'd':   # right
+                    send_can_frame(ser, CANID_MOTOR_CMD, [CMD_TURN_RIGHT, current_speed, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+                elif key == b' ':   # stop
+                    send_can_frame(ser, CANID_MOTOR_CMD, [CMD_STOP, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
             
+            if time.time() - last_rx_heartbeat > 1:
+                print("Heartbeat timeout")
             time.sleep(0.01)
     except KeyboardInterrupt:
         print("\nstopped")
