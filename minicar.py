@@ -89,18 +89,20 @@ def main():
     
     try:
         while True:
-            # Receive CAN messages
-            receive_can(bus)
+            # log all RX 
+            if ser.in_waiting >= 20:
+                receive_can(ser)
             
-            # Send heartbeat every 1 second
+            global last_tx_heartbeat
+
+            # send heartbeat to 
             if time.time() - last_tx_heartbeat > 1:
-                send_can_frame(bus, CANID_RX_HEARTBEAT, [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+                send_can_frame(ser, CANID_RX_HEARTBEAT, [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
                 last_tx_heartbeat = time.time()
-            
-            # Check for keyboard input
-            key = get_key()
-            
-            if key:
+            # TX
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                
                 # Speed control (1-9)
                 if key in [b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9']:
                     speed_level = int(key.decode())
